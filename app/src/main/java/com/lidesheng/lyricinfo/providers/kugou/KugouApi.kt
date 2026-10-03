@@ -2,8 +2,8 @@ package com.lidesheng.lyricinfo.providers.kugou
 
 import android.util.Base64
 import android.util.Log
+import com.lidesheng.lyricinfo.core.KrcParser
 import com.lidesheng.lyricinfo.core.LyricResult
-import com.lidesheng.lyricinfo.providers.qishui.KrcParser
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
@@ -54,9 +54,7 @@ internal object KugouApi {
     )
 
     private val KRC_LINE = Regex("""\[\d+,\d+]""")
-    private val KRC_LINE_HEADER = Regex("""\[(\d+),(\d+)]""")
     private val LRC_LINE = Regex("""\[\d{1,3}:\d{2}(?:\.\d{1,3})?]""")
-    private const val LANGUAGE_HEADER_PREFIX = "[language:"
 
     data class TrackRequest(
         val identity: String,
@@ -81,16 +79,6 @@ internal object KugouApi {
     private data class DownloadedPayload(
         val content: String,
         val type: String
-    )
-
-    private data class EmbeddedTranslation(
-        val content: String,
-        val type: String
-    )
-
-    private data class KrcLine(
-        val startMs: Long,
-        val durationMs: Long
     )
 
     fun fetch(track: TrackRequest): Result? {
@@ -132,19 +120,9 @@ internal object KugouApi {
                 downloaded?.type.orEmpty().isNotBlank() -> downloaded?.type.orEmpty()
                 else -> candidateType
             }
-            val embeddedTranslation = if (originalType == "krc") {
-                extractEmbeddedTranslation(content)
-            } else {
-                null
-            }
-            val translationPayload = embeddedTranslation?.content
-            val translationType = embeddedTranslation?.type.orEmpty()
-
-            val original = KrcParser.parse(originalType, content) ?: return null
-            val translation = translationPayload?.let {
-                KrcParser.parse(translationType, it)
-            }
-            val result = original.copy(translation = translation?.preferredLane())
+            // KRC's [language:] header can contain both translation and
+            // word-aligned romanization; KrcParser keeps both as separate lanes.
+            val result = KrcParser.parse(originalType, content) ?: return null
             if (result.lyric.isBlank()) return null
 
             Result(
@@ -321,79 +299,6 @@ internal object KugouApi {
             }
         }
         return null
-    }
-
-    /**
-     * Kugou can embed translated lines in the decoded KRC payload instead of
-     * returning a second translation field. The language header contains a
-     * Base64-encoded JSON object whose type=1 entry is aligned with KRC lines.
-     */
-    private fun extractEmbeddedTranslation(content: String): EmbeddedTranslation? {
-        val languageHeader = content.lineSequence()
-            .map { it.trim() }
-            .firstOrNull { it.startsWith(LANGUAGE_HEADER_PREFIX) && it.endsWith("]") }
-            ?: return null
-        val encoded = languageHeader.substring(
-            LANGUAGE_HEADER_PREFIX.length,
-            languageHeader.length - 1
-        )
-            .takeIf { it.isNotBlank() }
-            ?: return null
-
-        val decoded = runCatching { Base64.decode(encoded, Base64.DEFAULT) }
-            .recoverCatching { Base64.decode(encoded, Base64.URL_SAFE) }
-            .getOrNull()
-            ?: return null
-        val language = runCatching {
-            JSONObject(String(decoded, StandardCharsets.UTF_8))
-        }.getOrNull() ?: return null
-        val languageContent = language.optJSONArray("content") ?: return null
-
-        var translationLines: JSONArray? = null
-        for (index in 0 until languageContent.length()) {
-            val item = languageContent.optJSONObject(index) ?: continue
-            if (item.optInt("type", -1) == 1) {
-                translationLines = item.optJSONArray("lyricContent")
-                    ?.takeIf { it.length() > 0 }
-                if (translationLines != null) break
-            }
-        }
-        val lines = translationLines ?: return null
-
-        val originalLines = content.lineSequence().mapNotNull { rawLine ->
-            val match = KRC_LINE_HEADER.find(rawLine) ?: return@mapNotNull null
-            val startMs = match.groupValues[1].toLongOrNull() ?: return@mapNotNull null
-            val durationMs = match.groupValues[2].toLongOrNull() ?: return@mapNotNull null
-            KrcLine(startMs, durationMs)
-        }.toList()
-        if (originalLines.isEmpty()) return null
-
-        val output = StringBuilder()
-        val count = minOf(originalLines.size, lines.length())
-        for (index in 0 until count) {
-            val translationLine = lines.optJSONArray(index) ?: continue
-            val text = buildString {
-                for (partIndex in 0 until translationLine.length()) {
-                    val part = translationLine.opt(partIndex)
-                    if (part is CharSequence) append(part)
-                }
-            }
-            if (text.isBlank()) continue
-
-            val originalLine = originalLines[index]
-            output.append('[')
-                .append(originalLine.startMs)
-                .append(',')
-                .append(originalLine.durationMs)
-                .append(']')
-                .append(text)
-                .append('\n')
-        }
-
-        return output.toString()
-            .trimEnd()
-            .takeIf { it.isNotBlank() }
-            ?.let { EmbeddedTranslation(it, "krc") }
     }
 
     private fun decodePayload(value: String?): String? {

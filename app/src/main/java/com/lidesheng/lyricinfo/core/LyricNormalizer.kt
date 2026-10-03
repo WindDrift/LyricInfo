@@ -1,6 +1,6 @@
 package com.lidesheng.lyricinfo.core
 
-import android.util.Log
+import java.util.Locale
 
 /**
  * Normalizes lyrics from various private formats to a standard line LRC lane
@@ -16,34 +16,38 @@ import android.util.Log
 object LyricNormalizer {
 
     // [startMs,durationMs] — used by YRC and QRC
-    private val MS_LINE_PATTERN = Regex("""\[(\d+)\s*,\s*(\d+)](.+)""")
-    private val YRC_WORD_PATTERN = Regex("""\((\d+)\s*,\s*(\d+)(?:,\s*\d+)?\)(.*?)(?=\(|$)""")
-    private val QRC_WORD_PATTERN = Regex("""\((\d+)\s*,\s*\d+\)""")
-    private val ELRC_TAG_PATTERN = Regex("""<\d{2}:\d{2}\.\d{2,3}>""")
+    private val MS_LINE_PATTERN = Regex("""^\[(\d+)\s*,\s*(\d+)](.*)$""")
+    private val YRC_WORD_PATTERN = Regex(
+        """\((\d+)\s*,\s*(\d+)(?:\s*,\s*\d+)?\)(.*?)(?=\(\d+\s*,\s*\d+(?:\s*,\s*\d+)?\)|$)"""
+    )
+    private val QRC_WORD_PATTERN = Regex("""\((\d+)\s*,\s*(\d+)\)""")
+    private val KRC_WORD_PATTERN = Regex("""<\d+\s*,\s*\d+\s*,\s*\d+>""")
+    private val ELRC_TAG_PATTERN = Regex("""<\d{1,3}:\d{2}(?:\.\d{1,3})?>""")
     private val YRC_INDICATOR = Regex("""\(\d+\s*,\s*\d+\s*,\s*\d+""")
-    // [mm:ss.xxx] or [mm:ss.xx] — standard LRC time tag
-    private val LRC_TIME_TAG = Regex("""\[\d{2}:\d{2}\.\d{2,3}]""")
+    // [mm:ss], [mm:ss.x], [mm:ss.xx], or [mm:ss.xxx]
+    private val LRC_TIME_TAG = Regex("""\[\d{1,3}:\d{2}(?:\.\d{1,3})?]""")
+    private val METADATA_TAG_LINE = Regex("""^\[[A-Za-z][A-Za-z0-9_-]*:.*]$""")
 
     fun normalize(raw: String): LyricResult? {
         if (raw.isBlank()) return null
-        val trimmed = raw.trim()
+        val trimmed = raw.trim().removePrefix("\uFEFF")
 
         // YRC must be checked before QRC: both share [ms,ms] prefix,
         // but YRC word-tags (offset,dur,flags) also match QRC's (offset,dur) pattern.
         if (isYrc(trimmed)) {
             val elrc = yrcToElrc(trimmed) ?: return null
-            return fromEnhanced(elrc)
+            return fromEnhanced(preservePrefixMetadata(trimmed, elrc))
         }
 
         if (isQrc(trimmed)) {
             val elrc = qrcToElrc(trimmed) ?: return null
-            return fromEnhanced(elrc)
+            return fromEnhanced(preservePrefixMetadata(trimmed, elrc))
         }
 
         // Word-level LRC: [mm:ss.xxx]word[mm:ss.xxx]word...
         if (isWordLrc(trimmed)) {
             val elrc = wordLrcToElrc(trimmed) ?: return null
-            return fromEnhanced(elrc)
+            return fromEnhanced(preservePrefixMetadata(trimmed, elrc))
         }
 
         if (isElrc(trimmed)) {
@@ -73,28 +77,43 @@ object LyricNormalizer {
     }
 
     private fun isYrc(content: String): Boolean {
-        val firstLine = firstContentLine(content) ?: return false
-        val afterBracket = firstLine.substringAfter("]", "")
-        return MS_LINE_PATTERN.containsMatchIn(firstLine) &&
-            YRC_INDICATOR.containsMatchIn(afterBracket)
+        return timedMillisecondLines(content).any { line ->
+            YRC_INDICATOR.containsMatchIn(line.substringAfter("]", ""))
+        }
     }
 
     private fun isQrc(content: String): Boolean {
-        val firstLine = firstContentLine(content) ?: return false
-        val afterBracket = firstLine.substringAfter("]", "")
-        return MS_LINE_PATTERN.containsMatchIn(firstLine) &&
-            QRC_WORD_PATTERN.containsMatchIn(afterBracket)
+        val lines = timedMillisecondLines(content)
+        if (lines.isEmpty()) return false
+        if (lines.any { QRC_WORD_PATTERN.containsMatchIn(it.substringAfter("]", "")) }) {
+            return true
+        }
+        return lines.none { KRC_WORD_PATTERN.containsMatchIn(it.substringAfter("]", "")) }
     }
 
-    /** Skip metadata lines like [by:], [offset:0], [ti:xxx] */
-    private fun firstContentLine(content: String): String? {
+    private fun timedMillisecondLines(content: String): List<String> {
         return content.lineSequence()
-            .map { it.trim() }
-            .firstOrNull { line ->
-                line.isNotBlank() &&
-                    !line.startsWith("{") &&
-                    !line.matches(Regex("""\[[a-zA-Z].*]"""))
-            }
+            .map { it.trim().removePrefix("\uFEFF") }
+            .filter { MS_LINE_PATTERN.matches(it) }
+            .toList()
+    }
+
+    /** Prefix LRC metadata is part of the source lyric and must survive conversion. */
+    internal fun prefixMetadataLines(content: String): List<String> {
+        val result = mutableListOf<String>()
+        for (rawLine in content.lineSequence()) {
+            val line = rawLine.trim().removePrefix("\uFEFF")
+            if (line.isBlank()) continue
+            if (!METADATA_TAG_LINE.matches(line)) break
+            result += line
+        }
+        return result
+    }
+
+    private fun preservePrefixMetadata(source: String, converted: String): String {
+        val metadata = prefixMetadataLines(source)
+        if (metadata.isEmpty()) return converted
+        return (metadata + converted).joinToString("\n")
     }
 
     private fun isElrc(content: String): Boolean {
@@ -108,11 +127,13 @@ object LyricNormalizer {
     private fun isWordLrc(content: String): Boolean {
         for (line in content.lineSequence()) {
             val trimmed = line.trim()
-            if (trimmed.isBlank()) continue
-            val firstTag = LRC_TIME_TAG.find(trimmed) ?: continue
-            val afterFirst = trimmed.substring(firstTag.range.last + 1)
-            // Check if there's another [mm:ss.xxx] tag in the text body
-            if (LRC_TIME_TAG.containsMatchIn(afterFirst)) return true
+            val tags = LRC_TIME_TAG.findAll(trimmed).toList()
+            if (tags.size < 2) continue
+            if (tags.indices.drop(1).any { index ->
+                    trimmed.substring(tags[index - 1].range.last + 1, tags[index].range.first)
+                        .isNotBlank()
+                }
+            ) return true
         }
         return false
     }
@@ -131,15 +152,20 @@ object LyricNormalizer {
             val trimmed = line.trim()
             if (trimmed.isBlank() || trimmed.startsWith("{")) continue
 
-            val lineMatch = MS_LINE_PATTERN.find(trimmed) ?: continue
+            val lineMatch = MS_LINE_PATTERN.matchEntire(trimmed) ?: continue
             val startMs = lineMatch.groupValues[1].toLongOrNull() ?: continue
             val body = lineMatch.groupValues[3]
 
             val wordMatches = YRC_WORD_PATTERN.findAll(body).toList()
-            if (wordMatches.isEmpty()) continue
+            if (wordMatches.isEmpty()) {
+                val text = body.trim()
+                if (text.isNotEmpty()) outputLines.add("${formatLrcTime(startMs)}$text")
+                continue
+            }
 
             val elrcLine = StringBuilder(formatLrcTime(startMs))
             for (wordMatch in wordMatches) {
+                // YRC word timestamps are absolute song positions, unlike KRC offsets.
                 val absoluteMs = wordMatch.groupValues[1].toLongOrNull() ?: continue
                 val text = wordMatch.groupValues[3]
                 if (text.isNotEmpty()) {
@@ -157,8 +183,8 @@ object LyricNormalizer {
     /**
      * QRC (QQ Music) -> Enhanced LRC.
      *
-     * Input:  [12345,3000]She(500,200) played(800,300)...
-     * Output: [00:12.34] <00:12.84>She <00:13.14>played...
+     * QRC word timestamps are absolute song positions. A timestamp follows
+     * the word it describes, so each text segment is paired with the next tag.
      */
     private fun qrcToElrc(content: String): String? {
         val outputLines = mutableListOf<String>()
@@ -167,7 +193,7 @@ object LyricNormalizer {
             val trimmed = line.trim()
             if (trimmed.isBlank()) continue
 
-            val lineMatch = MS_LINE_PATTERN.find(trimmed) ?: continue
+            val lineMatch = MS_LINE_PATTERN.matchEntire(trimmed) ?: continue
             val startMs = lineMatch.groupValues[1].toLongOrNull() ?: continue
             val body = lineMatch.groupValues[3]
 
@@ -180,48 +206,19 @@ object LyricNormalizer {
                 continue
             }
 
-            Log.i("LyricNormalizer", "qrc body: |$body|")
-            Log.i("LyricNormalizer", "qrc tags: ${tagMatches.map { "${it.value}@${it.range}" }}")
-            Log.i("LyricNormalizer", "qrc firstTagStart=${tagMatches[0].range.first}, text='${body.substring(0, tagMatches[0].range.first)}'")
-
             val elrcLine = StringBuilder(formatLrcTime(startMs))
-
-            // Text before first tag uses first tag's offset
-            val firstTagStart = tagMatches[0].range.first
-            if (firstTagStart > 0) {
-                val text = body.substring(0, firstTagStart)
-                if (text.isNotBlank()) {
-                    val offsetMs = tagMatches[0].groupValues[1].toLongOrNull() ?: 0
-                    elrcLine.append(formatElrcTime(offsetMs))
+            var textStart = 0
+            for (tag in tagMatches) {
+                val text = body.substring(textStart, tag.range.first)
+                if (text.isNotEmpty()) {
+                    val wordStartMs = tag.groupValues[1].toLongOrNull() ?: startMs
+                    if (text.isNotBlank()) elrcLine.append(formatElrcTime(wordStartMs))
+                    elrcLine.append(text)
                 }
-                elrcLine.append(text)
+                textStart = tag.range.last + 1
             }
-
-            // Text after each tag uses next tag's offset (or last tag's for trailing)
-            for (i in 0 until tagMatches.size - 1) {
-                val textStart = tagMatches[i].range.last + 1
-                val textEnd = tagMatches[i + 1].range.first
-                val text = body.substring(textStart, textEnd)
-                // Preserve separators without creating a standalone timed word.
-                if (text.isNotBlank()) {
-                    val offsetMs = tagMatches[i + 1].groupValues[1].toLongOrNull() ?: continue
-                    elrcLine.append(formatElrcTime(offsetMs))
-                }
-                elrcLine.append(text)
-            }
-
-            // Text after last tag
-            val lastEnd = tagMatches.last().range.last + 1
-            val trailing = body.substring(lastEnd)
-            if (trailing.isNotBlank()) {
-                val lastOffsetMs = tagMatches.last().groupValues[1].toLongOrNull() ?: 0
-                elrcLine.append(formatElrcTime(lastOffsetMs))
-            }
-            elrcLine.append(trailing)
-
-            val result = elrcLine.toString()
-            Log.i("LyricNormalizer", "qrc result: $result")
-            outputLines.add(result)
+            elrcLine.append(body.substring(textStart))
+            outputLines.add(elrcLine.toString())
         }
 
         return outputLines.takeIf { it.isNotEmpty() }?.joinToString("\n")
@@ -288,7 +285,7 @@ object LyricNormalizer {
         val min = totalSec / 60
         val sec = totalSec % 60
         val millis = ms % 1000
-        return "[%02d:%02d.%03d]".format(min, sec, millis)
+        return String.format(Locale.ROOT, "[%02d:%02d.%03d]", min, sec, millis)
     }
 
     /** Word-level: <mm:ss.xxx> */
@@ -297,6 +294,6 @@ object LyricNormalizer {
         val min = totalSec / 60
         val sec = totalSec % 60
         val millis = ms % 1000
-        return "<%02d:%02d.%03d>".format(min, sec, millis)
+        return String.format(Locale.ROOT, "<%02d:%02d.%03d>", min, sec, millis)
     }
 }

@@ -4,6 +4,7 @@ import android.media.MediaMetadata
 import android.os.Bundle
 import android.util.Log
 import com.lidesheng.lyricinfo.core.BaseLyricProvider
+import com.lidesheng.lyricinfo.core.KrcParser
 import com.lidesheng.lyricinfo.core.LyricResult
 import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedModule
@@ -133,7 +134,9 @@ class QishuiProvider : BaseLyricProvider() {
             val translation = translationResult?.let { (transType, transContent) ->
                 KrcParser.parse(transType, transContent)
             }
-            val result = original.copy(translation = translation?.preferredLane())
+            val result = original.copy(
+                translation = translation?.preferredLane() ?: original.translation
+            )
             Log.d(
                 TAG,
                 "[Qishui] Parsed $type: ${result.lyric.length} chars, " +
@@ -397,7 +400,9 @@ class QishuiProvider : BaseLyricProvider() {
         val translationResult = translation?.let {
             KrcParser.parse(it.type, it.content)
         }
-        return originalResult.copy(translation = translationResult?.preferredLane())
+        return originalResult.copy(
+            translation = translationResult?.preferredLane() ?: originalResult.translation
+        )
     }
 
     private fun extractRawLyric(value: Any?): RawLyric? {
