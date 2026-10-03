@@ -20,6 +20,9 @@ internal object QQMusicApi {
         "https://c.y.qq.com/v8/fcg-bin/fcg_play_single_song.fcg"
     private const val USER_AGENT =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    private val TIMED_LRC_LINE = Regex(
+        """(?m)^\s*\[\d{1,3}:\d{2}(?:\.\d{1,3})?]"""
+    )
 
     data class SongMetadata(
         val songId: String,
@@ -93,17 +96,20 @@ internal object QQMusicApi {
             val content = extractCData(raw, "content")
             val decrypted = QrcDecrypter.decrypt(content)
             val rawQrc = QrcParser.toRawQrc(decrypted)
-            val lrc = QrcParser.toLrc(decrypted)
-
-            if (lrc.isNullOrBlank()) return null
 
             // Try to extract translation (contentts tag, usually standard LRC format)
             val translationContent = extractCData(raw, "contentts")
             val decryptedTrans = translationContent?.let { QrcDecrypter.decrypt(it) }
             val translationLrc = decryptedTrans?.takeIf { it.isNotBlank() }
 
-            val rawLyric = rawQrc?.takeIf { it.isNotBlank() } ?: lrc
+            // QQ returns romanization as a parallel encrypted lyric payload.
+            val romaContent = extractCData(raw, "contentroma")
+            val decryptedRoma = romaContent?.let { QrcDecrypter.decrypt(it) }
+            val romaRaw = QrcParser.toRawQrc(decryptedRoma)
+
+            val rawLyric = rawQrc?.takeIf { it.isNotBlank() } ?: return null
             val normalized = LyricNormalizer.normalize(rawLyric)
+                ?.takeIf { TIMED_LRC_LINE.containsMatchIn(it.lyric) }
                 ?: return null
 
             // QQ's contentts contains LRC metadata, placeholders, and may omit
@@ -111,7 +117,14 @@ internal object QQMusicApi {
             val translationLane = translationLrc?.let {
                 normalizeTranslation(normalized.lyric, it)
             }
-            normalized.copy(translation = translationLane)
+            val romaLane = romaRaw
+                ?.takeIf { it.isNotBlank() }
+                ?.let(LyricNormalizer::normalize)
+                ?.preferredLane()
+            normalized.copy(
+                translation = translationLane,
+                roma = romaLane
+            )
         } catch (e: Exception) {
             Log.e(TAG, "[QQMusic] API error: ${e.message}")
             null

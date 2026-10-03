@@ -82,8 +82,11 @@ internal object NeteaseApi {
             val params = JSONObject().apply {
                 put("id", musicId.toString())
                 put("cp", false)
-                put("lv", 0); put("tv", 0); put("rv", 0)
-                put("yv", 0); put("ytv", 0); put("yrv", 0)
+                // -1 requests the latest available lane; 0 disables it.
+                put("lv", -1)
+                put("tv", -1)
+                put("rv", -1)
+                put("yv", -1)
             }
 
             val response = request("song/lyric/v1", params.toString())
@@ -92,6 +95,7 @@ internal object NeteaseApi {
             val lrcRaw = json.optJSONObject("lrc")?.optString("lyric")
             val yrcRaw = json.optJSONObject("yrc")?.optString("lyric")
             val tlyricRaw = json.optJSONObject("tlyric")?.optString("lyric")
+            val romalrcRaw = json.optJSONObject("romalrc")?.optString("lyric")
 
             val lrc = lrcRaw?.takeIf { it.isNotBlank() }
             val translation = tlyricRaw?.takeIf { it.isNotBlank() }
@@ -110,10 +114,15 @@ internal object NeteaseApi {
             // Keep translation as an independent lane. It may itself be enhanced LRC.
             val transNormalized = translation?.let { LyricNormalizer.normalize(it) }
             val translationLane = transNormalized?.preferredLane()
+            val romaLane = romalrcRaw
+                ?.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+                ?.let(LyricNormalizer::normalize)
+                ?.preferredLane()
             normalized.copy(
                 translation = translationLane?.let {
                     alignTranslationTimestamps(normalized.lyric, it)
-                }
+                },
+                roma = romaLane
             )
         } catch (e: Exception) {
             Log.e(TAG, "[Netease] API error: ${e.message}")
