@@ -29,7 +29,7 @@ internal object QQMusicApi {
         val songName: String,
         val artist: String,
         val album: String,
-        val songMid: String
+        val songMid: String = ""
     )
 
     /**
