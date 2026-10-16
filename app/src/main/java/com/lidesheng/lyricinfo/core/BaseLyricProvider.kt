@@ -69,7 +69,8 @@ abstract class BaseLyricProvider : LyricProvider {
             songName = track.songName,
             artist = track.artist,
             album = track.album,
-            songId = track.songId
+            songId = track.songId,
+            songMid = track.songMid
         )
         lyricCache[track.cacheKey] = result
         cachedEntries[track.cacheKey] = entry
