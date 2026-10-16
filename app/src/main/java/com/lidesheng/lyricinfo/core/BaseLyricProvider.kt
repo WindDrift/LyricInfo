@@ -19,7 +19,8 @@ abstract class BaseLyricProvider : LyricProvider {
         val artist: String,
         val album: String,
         val songId: String,
-        val cacheKey: String = songId
+        val cacheKey: String = songId,
+        val songMid: String = ""
     )
 
     companion object {
