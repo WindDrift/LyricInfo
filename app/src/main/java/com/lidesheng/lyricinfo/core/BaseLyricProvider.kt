@@ -181,7 +181,8 @@ abstract class BaseLyricProvider : LyricProvider {
             artist = track.artist,
             songId = track.songId,
             album = track.album,
-            result = result
+            result = result,
+            songMid = track.songMid
         ) ?: run {
             bundle.remove(LYRIC_INFO_KEY)
             Log.w(TAG, "[Inject] skipped invalid lyric result$logSuffix")
